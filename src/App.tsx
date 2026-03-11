@@ -1,6 +1,6 @@
 import React, { useState, useRef, useEffect, useCallback } from 'react';
 import { Upload, Pipette, RotateCcw, Download, Image as ImageIcon, Check, Layers, Search, Loader2, ChevronUp } from 'lucide-react';
-import { getMapeiColorByCode, searchMapeiColors, loadMapeiPalette, MapeiColor } from './services/mapeiPalette';
+import { getMapeiColorByCode, searchMapeiColors, loadMapeiPalette, getGroupedPalette, MapeiColor, ColorFamily } from './services/mapeiPalette';
 
 interface Modification {
   renderIdColor: string; // hex
@@ -19,7 +19,8 @@ export default function App() {
   const [isSearchingColor, setIsSearchingColor] = useState(false);
   const [searchError, setSearchError] = useState<string | null>(null);
   const [mapeiPalette, setMapeiPalette] = useState<MapeiColor[]>([]);
-  const [filteredPalette, setFilteredPalette] = useState<MapeiColor[]>([]);
+  const [groupedPalette, setGroupedPalette] = useState<ColorFamily[]>([]);
+  const [selectedFamilyId, setSelectedFamilyId] = useState<string | null>(null);
   const [selectionMask, setSelectionMask] = useState<Uint8ClampedArray | null>(null);
   const [isToolbarVisible, setIsToolbarVisible] = useState(true);
   const [isPaletteOpen, setIsPaletteOpen] = useState(false);
@@ -82,8 +83,10 @@ export default function App() {
     const initPalette = async () => {
       try {
         const palette = await loadMapeiPalette();
+        const grouped = await getGroupedPalette();
         setMapeiPalette(palette);
-        setFilteredPalette(palette.slice(0, 50)); // Show first 50 initially
+        setGroupedPalette(grouped);
+        if (grouped.length > 0) setSelectedFamilyId(grouped[0].id);
       } catch (error) {
         console.error("Failed to load palette:", error);
       }
@@ -93,12 +96,12 @@ export default function App() {
 
   useEffect(() => {
     if (colorCodeInput.trim()) {
-      const filtered = mapeiPalette.filter(c => 
-        c.code.toLowerCase().includes(colorCodeInput.toLowerCase())
-      );
-      setFilteredPalette(filtered.slice(0, 50)); // Limit display for performance
-    } else {
-      setFilteredPalette(mapeiPalette.slice(0, 50));
+      const normalized = colorCodeInput.trim().toLowerCase();
+      const found = mapeiPalette.find(c => c.code.toLowerCase() === normalized);
+      if (found && found.familyId) {
+        setSelectedFamilyId(found.familyId);
+        setCurrentColor(found.hex);
+      }
     }
   }, [colorCodeInput, mapeiPalette]);
 
@@ -232,7 +235,10 @@ export default function App() {
     if (existingMod) {
       setCurrentColor(existingMod);
       const mapeiMatch = mapeiPalette.find(c => c.hex === existingMod);
-      if (mapeiMatch) setColorCodeInput(mapeiMatch.code);
+      if (mapeiMatch) {
+        setColorCodeInput(mapeiMatch.code);
+        if (mapeiMatch.familyId) setSelectedFamilyId(mapeiMatch.familyId);
+      }
       else setColorCodeInput('');
     } else {
       // Default to white if no mod exists
@@ -289,6 +295,7 @@ export default function App() {
       
       if (color) {
         setCurrentColor(color.hex);
+        if (color.familyId) setSelectedFamilyId(color.familyId);
       } else {
         setSearchError("Color not found in Mapei catalog");
       }
@@ -448,38 +455,57 @@ export default function App() {
           >
             {/* Palette Overlay (Popup) */}
             {selectedRenderColor && isPaletteOpen && (
-              <div className={`w-full max-w-xl px-4 mb-6 transition-all duration-500 ${isToolbarVisible ? 'translate-y-0 opacity-100' : 'translate-y-12 opacity-0'}`}>
-                <div className="bg-[#141419]/95 backdrop-blur-xl border border-white/10 rounded-2xl p-4 shadow-2xl pointer-events-auto relative">
+              <div className={`w-full max-w-2xl px-4 mb-6 transition-all duration-500 ${isToolbarVisible ? 'translate-y-0 opacity-100' : 'translate-y-12 opacity-0'}`}>
+                <div className="bg-[#141419]/95 backdrop-blur-xl border border-white/10 rounded-2xl p-5 shadow-2xl pointer-events-auto relative">
                   {/* Arrow */}
                   <div className="absolute -bottom-2 left-1/2 -translate-x-1/2 w-4 h-4 bg-[#141419] border-r border-b border-white/10 rotate-45"></div>
                   
-                  <div className="flex justify-between items-center mb-3">
-                    <span className="text-[8px] uppercase tracking-[0.2em] font-bold text-[#6b7cff]">Mapei Master Collection</span>
+                  <div className="flex justify-between items-center mb-4">
+                    <div className="flex flex-col">
+                      <span className="text-[8px] uppercase tracking-[0.2em] font-bold text-[#6b7cff]">Mapei Master Collection</span>
+                      <span className="text-[10px] text-white/40 font-medium">Browse by color family</span>
+                    </div>
                     <button 
                       onClick={() => setIsPaletteOpen(false)}
-                      className="text-[10px] uppercase tracking-widest font-bold opacity-40 hover:opacity-100 transition-opacity"
+                      className="text-[10px] uppercase tracking-widest font-bold opacity-40 hover:opacity-100 transition-opacity bg-white/5 px-3 py-1 rounded-full"
                     >
                       Close
                     </button>
                   </div>
-                  <div className="grid grid-cols-10 gap-1.5">
-                    {filteredPalette.slice(0, 30).map(c => (
-                      <button 
-                        key={c.code}
-                        onClick={() => {
-                          setCurrentColor(c.hex);
-                          setColorCodeInput(c.code);
-                          // We keep the palette open as per user request "barra não desapace"
-                          // but the color circle updates automatically because it uses currentColor
-                        }}
-                        className={`aspect-square rounded-md border transition-all hover:scale-110 relative group ${currentColor === c.hex ? 'border-[#6b7cff] ring-2 ring-[#6b7cff]/30' : 'border-white/5'}`}
-                        style={{ backgroundColor: c.hex }}
+
+                  {/* Family Tabs */}
+                  <div className="flex items-center gap-1.5 mb-5 overflow-x-auto pb-2 custom-scrollbar no-scrollbar">
+                    {groupedPalette.map(family => (
+                      <button
+                        key={family.id}
+                        onClick={() => setSelectedFamilyId(family.id)}
+                        className={`flex items-center gap-2 px-3 py-1.5 rounded-full border transition-all whitespace-nowrap ${selectedFamilyId === family.id ? 'bg-white/10 border-[#6b7cff] text-white' : 'bg-white/5 border-white/5 text-white/40 hover:bg-white/10'}`}
                       >
-                        <div className="absolute -top-7 left-1/2 -translate-x-1/2 bg-[#0f1115] text-white text-[7px] px-1.5 py-0.5 rounded opacity-0 group-hover:opacity-100 transition-opacity pointer-events-none whitespace-nowrap z-50 border border-white/10">
-                          {c.code}
-                        </div>
+                        <div className="w-2.5 h-2.5 rounded-full shadow-sm" style={{ backgroundColor: family.hex }}></div>
+                        <span className="text-[9px] uppercase tracking-wider font-bold">{family.label}</span>
                       </button>
                     ))}
+                  </div>
+                  
+                  {/* Variants Grid */}
+                  <div className="max-h-48 overflow-y-auto pr-2 custom-scrollbar">
+                    <div className="grid grid-cols-12 gap-1.5">
+                      {groupedPalette.find(f => f.id === selectedFamilyId)?.variants.map(c => (
+                        <button 
+                          key={c.code}
+                          onClick={() => {
+                            setCurrentColor(c.hex);
+                            setColorCodeInput(c.code);
+                          }}
+                          className={`aspect-square rounded-md border transition-all hover:scale-110 relative group ${currentColor === c.hex ? 'border-white ring-2 ring-[#6b7cff] z-10' : 'border-white/5'}`}
+                          style={{ backgroundColor: c.hex }}
+                        >
+                          <div className="absolute -top-7 left-1/2 -translate-x-1/2 bg-[#0f1115] text-white text-[7px] px-1.5 py-0.5 rounded opacity-0 group-hover:opacity-100 transition-opacity pointer-events-none whitespace-nowrap z-50 border border-white/10 shadow-xl">
+                            {c.code}
+                          </div>
+                        </button>
+                      ))}
+                    </div>
                   </div>
                 </div>
               </div>
