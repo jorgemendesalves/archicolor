@@ -1,0 +1,5 @@
+{
+  "name": "Archicolor - Architectural Render ID Editor",
+  "description": "Recolor architectural elements using Render ID masks while preserving textures and lighting.",
+  "requestFramePermissions": []
+}
