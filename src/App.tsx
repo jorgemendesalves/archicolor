@@ -22,6 +22,8 @@ export default function App() {
   const [colorCodeInput, setColorCodeInput] = useState('');
   const [isSearchingColor, setIsSearchingColor] = useState(false);
   const [searchError, setSearchError] = useState<string | null>(null);
+  const [isShowingOriginal, setIsShowingOriginal] = useState(false);
+  const [originalFileName, setOriginalFileName] = useState<string>('');
   const [mapeiPalette, setMapeiPalette] = useState<MapeiColor[]>([]);
   const [groupedPalette, setGroupedPalette] = useState<ColorFamily[]>([]);
   const [selectedFamilyId, setSelectedFamilyId] = useState<string | null>(null);
@@ -39,6 +41,36 @@ export default function App() {
   const toolbarRef = useRef<HTMLDivElement>(null);
   const hoverTimerRef = useRef<NodeJS.Timeout | null>(null);
 
+  // Load from localStorage on mount
+  useEffect(() => {
+    const savedMods = localStorage.getItem('archicolor_modifications');
+    const savedRecent = localStorage.getItem('archicolor_recent');
+
+    if (savedMods) {
+      try {
+        const parsed = JSON.parse(savedMods);
+        setModifications(new Map(Object.entries(parsed)));
+      } catch (e) { console.error("Failed to load mods", e); }
+    }
+    if (savedRecent) {
+      try {
+        setRecentColors(JSON.parse(savedRecent));
+      } catch (e) { console.error("Failed to load recent", e); }
+    }
+  }, []);
+
+  // Save to localStorage
+  useEffect(() => {
+    if (modifications.size > 0) {
+      const obj = Object.fromEntries(modifications);
+      localStorage.setItem('archicolor_modifications', JSON.stringify(obj));
+    }
+  }, [modifications]);
+
+  useEffect(() => {
+    localStorage.setItem('archicolor_recent', JSON.stringify(recentColors));
+  }, [recentColors]);
+
   useEffect(() => {
     const handleClickOutside = (event: MouseEvent) => {
       if (toolbarRef.current && !toolbarRef.current.contains(event.target as Node)) {
@@ -55,6 +87,10 @@ export default function App() {
   const handleImageUpload = (e: React.ChangeEvent<HTMLInputElement>, type: 'original' | 'renderId') => {
     const file = e.target.files?.[0];
     if (!file) return;
+
+    if (type === 'original') {
+      setOriginalFileName(file.name.split('.').slice(0, -1).join('.'));
+    }
 
     const reader = new FileReader();
     reader.onload = (event) => {
@@ -149,6 +185,12 @@ export default function App() {
     origCtx.drawImage(originalImage, 0, 0);
     ridCtx.drawImage(renderIdImage, 0, 0);
 
+    if (isShowingOriginal) {
+      ctx.drawImage(originalImage, 0, 0);
+      setIsProcessing(false);
+      return;
+    }
+
     const originalData = origCtx.getImageData(0, 0, width, height);
     const renderIdData = ridCtx.getImageData(0, 0, width, height);
     const outputData = ctx.createImageData(width, height);
@@ -223,13 +265,13 @@ export default function App() {
 
     ctx.putImageData(outputData, 0, 0);
     setIsProcessing(false);
-  }, [originalImage, renderIdImage, modifications, selectionMask, previewColor, selectedRenderColor]);
+  }, [originalImage, renderIdImage, modifications, selectionMask, previewColor, selectedRenderColor, isShowingOriginal]);
 
   useEffect(() => {
     if (originalImage && renderIdImage) {
       processImage();
     }
-  }, [originalImage, renderIdImage, modifications, processImage, previewColor]);
+  }, [originalImage, renderIdImage, modifications, processImage, previewColor, isShowingOriginal]);
 
   const selectElementByColor = useCallback((hex: string) => {
     if (!renderIdCanvasRef.current || !originalImage) return;
@@ -281,6 +323,7 @@ export default function App() {
     setSelectionMask(mask);
     setIsPipetteActive(false);
     setIsToolbarVisible(true);
+    setIsPaletteOpen(true);
   }, [originalImage, modifications, mapeiPalette]);
 
   const handleCanvasClick = (e: React.MouseEvent<HTMLCanvasElement>) => {
@@ -304,18 +347,19 @@ export default function App() {
     selectElementByColor(hex);
   };
 
-  const applyColorChange = useCallback(() => {
+  const applyColorChange = useCallback((colorToApply?: string) => {
     if (!selectedRenderColor) return;
+    const color = colorToApply || currentColor;
     const newMods = new Map(modifications);
-    newMods.set(selectedRenderColor, currentColor);
+    newMods.set(selectedRenderColor, color);
     setModifications(newMods);
     setSelectionMask(null); // Clear highlight after applying
     setPreviewColor(null); // Clear preview
 
-    // Add to recent colors if not already there (or move to front)
+    // Add to recent colors if not already there (maintain position)
     setRecentColors(prev => {
-      const filtered = prev.filter(c => c !== currentColor);
-      return [currentColor, ...filtered].slice(0, 10); // Keep last 10
+      if (prev.includes(color)) return prev;
+      return [color, ...prev].slice(0, 10);
     });
   }, [selectedRenderColor, modifications, currentColor]);
 
@@ -366,6 +410,7 @@ export default function App() {
       if (color) {
         setCurrentColor(color.hex);
         if (color.familyId) setSelectedFamilyId(color.familyId);
+        applyColorChange(color.hex);
       } else {
         setSearchError("Color not found in Mapei catalog");
       }
@@ -379,6 +424,13 @@ export default function App() {
 
   useEffect(() => {
     const handleKeyDown = (e: KeyboardEvent) => {
+      // Comparison shortcuts
+      if (e.key === 'Tab' || e.key === '\\') {
+        e.preventDefault();
+        setIsShowingOriginal(true);
+        return;
+      }
+
       if (!selectedRenderColor) return;
       
       // Don't trigger if typing in the search input
@@ -395,14 +447,28 @@ export default function App() {
       }
     };
 
+    const handleKeyUp = (e: KeyboardEvent) => {
+      if (e.key === 'Tab' || e.key === '\\') {
+        setIsShowingOriginal(false);
+      }
+    };
+
     window.addEventListener('keydown', handleKeyDown);
-    return () => window.removeEventListener('keydown', handleKeyDown);
+    window.addEventListener('keyup', handleKeyUp);
+    return () => {
+      window.removeEventListener('keydown', handleKeyDown);
+      window.removeEventListener('keyup', handleKeyUp);
+    };
   }, [selectedRenderColor, applyColorChange, searchMapeiColor]);
 
   const exportImage = () => {
     if (!canvasRef.current) return;
     const link = document.createElement('a');
-    link.download = 'edited-render.png';
+    
+    const colorCode = colorCodeInput ? `_${colorCodeInput}` : '';
+    const fileName = `${originalFileName}${colorCode}_Archicolor.png`;
+    
+    link.download = fileName;
     link.href = canvasRef.current.toDataURL('image/png');
     link.click();
   };
@@ -418,6 +484,15 @@ export default function App() {
         
         {originalImage && renderIdImage && (
           <div className="flex gap-3 pointer-events-auto">
+            <button 
+              onMouseDown={() => setIsShowingOriginal(true)}
+              onMouseUp={() => setIsShowingOriginal(false)}
+              onMouseLeave={() => setIsShowingOriginal(false)}
+              className={`p-3 rounded-full transition-all border border-white/10 backdrop-blur-md ${isShowingOriginal ? 'bg-[#6b7cff] text-white' : 'bg-[#141419]/80 text-[#e6e8ee] hover:bg-[#141419]'}`}
+              title="Hold to Compare (Shortcut: TAB or \)"
+            >
+              {isShowingOriginal ? <Eye size={20} /> : <EyeOff size={20} />}
+            </button>
             <button 
               onClick={resetModifications}
               className="p-3 rounded-full bg-[#141419]/80 backdrop-blur-md border border-white/10 text-[#e6e8ee] hover:bg-[#141419] transition-all"
@@ -553,6 +628,7 @@ export default function App() {
                           onClick={() => {
                             setCurrentColor(c.hex);
                             setColorCodeInput(c.code);
+                            applyColorChange(c.hex);
                           }}
                           onMouseEnter={() => {
                             if (isPreviewEnabled && selectedRenderColor) {
@@ -583,7 +659,6 @@ export default function App() {
             {/* Recent Colors History */}
             {recentColors.length > 0 && (
               <div className={`mb-3 flex items-center gap-2 transition-all duration-500 ${isToolbarVisible ? 'translate-y-0 opacity-100' : 'translate-y-8 opacity-0'}`}>
-                <span className="text-[8px] uppercase tracking-[0.2em] font-bold text-white/30 mr-1">Recent</span>
                 <div className="flex items-center gap-1.5 pointer-events-auto">
                   {recentColors.map((color) => (
                     <div key={color} className="relative group/recent">
@@ -801,33 +876,13 @@ export default function App() {
                             const val = e.target.value;
                             setColorCodeInput(val);
                             const found = mapeiPalette.find(c => c.code.toLowerCase() === val.trim().toLowerCase());
-                            if (found) setCurrentColor(found.hex);
+                            if (found) {
+                              setCurrentColor(found.hex);
+                              applyColorChange(found.hex);
+                            }
                           }}
                           className="bg-transparent border-none text-[10px] font-mono w-16 focus:outline-none placeholder:opacity-20"
                         />
-                      </div>
-                    </div>
-
-                    <div className="w-px h-6 bg-white/10 mx-0.5"></div>
-
-                    {/* Apply Button */}
-                    <div className="relative group">
-                      <button 
-                        onClick={applyColorChange}
-                        className="flex items-center gap-1.5 px-6 py-2 bg-white text-[#0f1115] rounded-full hover:bg-[#6b7cff] hover:text-white transition-all font-bold text-[10px] uppercase tracking-widest"
-                      >
-                        <Check size={16} /> Apply
-                      </button>
-                      
-                      {/* Shortcut Tooltip */}
-                      <div className="absolute -bottom-6 -right-2 flex items-center gap-1 px-1.5 py-0.5 bg-[#141419]/90 backdrop-blur-md border border-white/10 rounded-md opacity-0 group-hover:opacity-100 transition-all duration-200 pointer-events-none scale-90 group-hover:scale-100 whitespace-nowrap">
-                        <div className="flex items-center gap-1 text-[7px] font-bold text-white/40">
-                          <span className="text-[9px]">↵</span> ENTER
-                        </div>
-                        <div className="w-px h-1.5 bg-white/10"></div>
-                        <div className="flex items-center gap-1 text-[7px] font-bold text-white/40">
-                          SPACE
-                        </div>
                       </div>
                     </div>
                   </>
