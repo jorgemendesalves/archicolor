@@ -2,10 +2,19 @@ import React, { useState, useRef, useEffect, useCallback } from 'react';
 import { Upload, Pipette, RotateCcw, Download, Image as ImageIcon, Check, Layers, Search, Loader2, ChevronUp, Eye, EyeOff, X } from 'lucide-react';
 import { getMapeiColorByCode, searchMapeiColors, loadMapeiPalette, getGroupedPalette, MapeiColor, ColorFamily } from './services/mapeiPalette';
 
+interface MaskMetadata {
+  maskId: string;
+  label: string;
+  uiColor: string;
+  displayCode: string;
+}
+
 export default function App() {
   const [originalImage, setOriginalImage] = useState<HTMLImageElement | null>(null);
   const [renderIdImage, setRenderIdImage] = useState<HTMLImageElement | null>(null);
   const [selectedRenderColor, setSelectedRenderColor] = useState<string | null>(null);
+  const [sessionMasks, setSessionMasks] = useState<Map<string, MaskMetadata>>(new Map());
+  const [isMaskManagerOpen, setIsMaskManagerOpen] = useState(false);
   const [currentColor, setCurrentColor] = useState<string>('#ffffff');
   const [modifications, setModifications] = useState<Map<string, string>>(new Map());
   const [isPipetteActive, setIsPipetteActive] = useState(false);
@@ -35,6 +44,7 @@ export default function App() {
       if (toolbarRef.current && !toolbarRef.current.contains(event.target as Node)) {
         setIsToolbarVisible(false);
         setIsPaletteOpen(false);
+        setIsMaskManagerOpen(false);
       }
     };
     document.addEventListener('mousedown', handleClickOutside);
@@ -208,12 +218,7 @@ export default function App() {
       }
 
       // Apply selection highlight if mask exists
-      if (selectionMask && selectionMask[i / 4] > 0) {
-        // Add a subtle cyan tint to the selected area
-        outputData.data[i] = outputData.data[i] * 0.7 + 0 * 0.3;
-        outputData.data[i + 1] = outputData.data[i + 1] * 0.7 + 255 * 0.3;
-        outputData.data[i + 2] = outputData.data[i + 2] * 0.7 + 255 * 0.3;
-      }
+      // Removed selection highlight as per user request
     }
 
     ctx.putImageData(outputData, 0, 0);
@@ -235,6 +240,31 @@ export default function App() {
     const rgb = hexToRgb(hex);
     setSelectedRenderColor(hex);
 
+    // If this mask already has a modification, update currentColor to it
+    const existingMod = modifications.get(hex);
+    if (existingMod) {
+      setCurrentColor(existingMod);
+      const mapeiMatch = mapeiPalette.find(c => c.hex === existingMod);
+      if (mapeiMatch) {
+        setColorCodeInput(mapeiMatch.code);
+        if (mapeiMatch.familyId) setSelectedFamilyId(mapeiMatch.familyId);
+      }
+      else setColorCodeInput('');
+    }
+
+    // Add to session masks if new
+    setSessionMasks(prev => {
+      if (prev.has(hex)) return prev;
+      const newMasks = new Map(prev);
+      newMasks.set(hex, {
+        maskId: hex,
+        label: `Mask ${hex.toUpperCase()}`,
+        uiColor: hex,
+        displayCode: hex.toUpperCase()
+      });
+      return newMasks;
+    });
+
     // Generate Mask based on Render ID
     const width = originalImage.width;
     const height = originalImage.height;
@@ -249,21 +279,6 @@ export default function App() {
       }
     }
     setSelectionMask(mask);
-
-    const existingMod = modifications.get(hex);
-    if (existingMod) {
-      setCurrentColor(existingMod);
-      const mapeiMatch = mapeiPalette.find(c => c.hex === existingMod);
-      if (mapeiMatch) {
-        setColorCodeInput(mapeiMatch.code);
-        if (mapeiMatch.familyId) setSelectedFamilyId(mapeiMatch.familyId);
-      }
-      else setColorCodeInput('');
-    } else {
-      // Default to white if no mod exists
-      setCurrentColor('#ffffff');
-      setColorCodeInput('');
-    }
     setIsPipetteActive(false);
     setIsToolbarVisible(true);
   }, [originalImage, modifications, mapeiPalette]);
@@ -310,10 +325,30 @@ export default function App() {
     setSelectionMask(null);
     setColorCodeInput('');
     setRecentColors([]);
+    setSessionMasks(new Map());
   };
 
   const removeRecentColor = (colorToRemove: string) => {
     setRecentColors(prev => prev.filter(color => color !== colorToRemove));
+  };
+
+  const removeMask = (maskId: string) => {
+    setSessionMasks(prev => {
+      const next = new Map(prev);
+      next.delete(maskId);
+      return next;
+    });
+    setModifications(prev => {
+      const next = new Map(prev);
+      next.delete(maskId);
+      return next;
+    });
+    if (selectedRenderColor === maskId) {
+      setSelectedRenderColor(null);
+      setSelectionMask(null);
+      setIsToolbarVisible(false);
+      setIsMaskManagerOpen(false);
+    }
   };
 
   const searchMapeiColor = useCallback(async () => {
@@ -546,13 +581,16 @@ export default function App() {
               <div className={`mb-3 flex items-center gap-2 transition-all duration-500 ${isToolbarVisible ? 'translate-y-0 opacity-100' : 'translate-y-8 opacity-0'}`}>
                 <span className="text-[8px] uppercase tracking-[0.2em] font-bold text-white/30 mr-1">Recent</span>
                 <div className="flex items-center gap-1.5 pointer-events-auto">
-                  {recentColors.map((color, idx) => (
-                    <div key={`${color}-${idx}`} className="relative group/recent">
+                  {recentColors.map((color) => (
+                    <div key={color} className="relative group/recent">
                       <button
                         onClick={() => {
                           setCurrentColor(color);
                           const mapeiMatch = mapeiPalette.find(c => c.hex === color);
                           if (mapeiMatch) setColorCodeInput(mapeiMatch.code);
+
+                          // Update recent colors list (maintain position)
+                          // Removed reordering logic as per user request
 
                           // Apply immediately if a mask is selected
                           if (selectedRenderColor) {
@@ -560,12 +598,6 @@ export default function App() {
                             newMods.set(selectedRenderColor, color);
                             setModifications(newMods);
                             setSelectionMask(null);
-                            
-                            // Update recent colors list (move to front)
-                            setRecentColors(prev => {
-                              const filtered = prev.filter(c => c !== color);
-                              return [color, ...filtered].slice(0, 10);
-                            });
                           }
                         }}
                         onMouseEnter={() => {
@@ -609,7 +641,10 @@ export default function App() {
               >
                 {/* Selection Trigger */}
                 <button 
-                  onClick={() => setIsPipetteActive(!isPipetteActive)}
+                  onClick={() => {
+                    setIsPipetteActive(!isPipetteActive);
+                    setIsMaskManagerOpen(false);
+                  }}
                   className={`flex items-center gap-2 px-4 py-2 rounded-full transition-all ${isPipetteActive ? 'bg-[#6b7cff] text-white shadow-lg shadow-[#6b7cff]/30' : 'hover:bg-white/5 text-[#e6e8ee]'}`}
                 >
                   <Pipette size={16} className={isPipetteActive ? 'animate-pulse' : ''} />
@@ -622,13 +657,115 @@ export default function App() {
                   <>
                     <div className="w-px h-6 bg-white/10 mx-0.5"></div>
                     
-                    {/* Mask Info */}
-                    <div className="flex items-center gap-2 px-2">
-                      <div className="w-5 h-5 rounded-full border border-white/20 shadow-inner" style={{ backgroundColor: selectedRenderColor }}></div>
-                      <div className="flex flex-col">
-                        <span className="text-[7px] uppercase tracking-widest opacity-40 font-bold">Mask</span>
-                        <span className="text-[9px] font-mono text-[#6b7cff]">{selectedRenderColor}</span>
-                      </div>
+                    {/* Mask Manager Trigger */}
+                    <div className="relative">
+                      <button 
+                        onClick={() => setIsMaskManagerOpen(!isMaskManagerOpen)}
+                        className={`flex items-center gap-2 px-3 py-1.5 rounded-full transition-all hover:bg-white/5 ${isMaskManagerOpen ? 'bg-white/10' : ''}`}
+                      >
+                        <div 
+                          className="w-5 h-5 rounded-full border border-white/20 shadow-inner" 
+                          style={{ backgroundColor: sessionMasks.get(selectedRenderColor)?.uiColor || selectedRenderColor }}
+                        ></div>
+                        <div className="flex flex-col items-start">
+                          <span className="text-[7px] uppercase tracking-widest opacity-40 font-bold">
+                            {sessionMasks.get(selectedRenderColor)?.label || 'Mask'}
+                          </span>
+                          <span className="text-[9px] font-mono text-[#6b7cff]">
+                            {sessionMasks.get(selectedRenderColor)?.displayCode || selectedRenderColor}
+                          </span>
+                        </div>
+                        <ChevronUp size={12} className={`opacity-40 transition-transform ${isMaskManagerOpen ? 'rotate-180' : ''}`} />
+                      </button>
+
+                      {/* Mask Manager Popover */}
+                      {isMaskManagerOpen && (
+                        <div className="absolute bottom-full left-0 mb-4 w-64 bg-[#141419]/95 backdrop-blur-2xl border border-white/10 rounded-2xl shadow-[0_20px_50px_rgba(0,0,0,0.5)] p-3 z-50 animate-in fade-in slide-in-from-bottom-2 duration-200">
+                          <div className="flex items-center justify-between mb-3 px-1">
+                            <div className="flex flex-col">
+                              <span className="text-[9px] uppercase tracking-[0.2em] font-bold text-white/80">Mask Manager</span>
+                            </div>
+                            <button 
+                              onClick={() => setIsMaskManagerOpen(false)} 
+                              className="w-5 h-5 flex items-center justify-center rounded-full bg-white/5 hover:bg-white/10 transition-colors"
+                            >
+                              <X size={10} className="opacity-40" />
+                            </button>
+                          </div>
+                          
+                          <div className="space-y-1.5 max-h-64 overflow-y-auto custom-scrollbar pr-1">
+                            {sessionMasks.size === 0 ? (
+                              <div className="py-4 text-center">
+                                <span className="text-[8px] text-white/20 uppercase tracking-widest font-bold italic">No masks</span>
+                              </div>
+                            ) : (
+                              (Array.from(sessionMasks.values()) as MaskMetadata[]).map((mask) => (
+                                <div 
+                                  key={mask.maskId}
+                                  onClick={() => {
+                                    selectElementByColor(mask.maskId);
+                                    setIsMaskManagerOpen(false);
+                                  }}
+                                  className={`group flex flex-col gap-1.5 p-2 rounded-xl border transition-all cursor-pointer ${selectedRenderColor === mask.maskId ? 'bg-[#6b7cff]/10 border-[#6b7cff]/30' : 'border-white/5 hover:bg-white/5'}`}
+                                >
+                                  <div className="flex items-center gap-2">
+                                    {/* UI Color Dot (Read-only) */}
+                                    <div className="relative w-4 h-4">
+                                      <div 
+                                        className="w-full h-full rounded-full border border-white/20 shadow-inner"
+                                        style={{ backgroundColor: mask.uiColor }}
+                                      ></div>
+                                    </div>
+                                    
+                                    {/* Editable Label */}
+                                    <input 
+                                      type="text"
+                                      value={mask.label}
+                                      onClick={(e) => e.stopPropagation()}
+                                      onChange={(e) => {
+                                        const newMasks = new Map(sessionMasks);
+                                        newMasks.set(mask.maskId, { ...mask, label: e.target.value });
+                                        setSessionMasks(newMasks);
+                                      }}
+                                      className="bg-white/5 border-none text-[10px] font-bold text-white px-2 py-1 rounded-md focus:outline-none focus:bg-white/10 w-full placeholder:opacity-20"
+                                      placeholder="Name..."
+                                    />
+                                    
+                                    <div className="flex items-center gap-1">
+                                      <button 
+                                        onClick={(e) => {
+                                          e.stopPropagation();
+                                          selectElementByColor(mask.maskId);
+                                          setIsMaskManagerOpen(false);
+                                        }}
+                                        className={`p-1 rounded-md transition-all ${selectedRenderColor === mask.maskId ? 'bg-[#6b7cff] text-white' : 'opacity-0 group-hover:opacity-100 bg-white/5 text-white/40 hover:text-white'}`}
+                                      >
+                                        <Check size={12} />
+                                      </button>
+                                      
+                                      <button 
+                                        onClick={(e) => {
+                                          e.stopPropagation();
+                                          removeMask(mask.maskId);
+                                        }}
+                                        className="p-1 rounded-md opacity-0 group-hover:opacity-100 bg-white/5 text-white/40 hover:text-red-400 hover:bg-red-400/10 transition-all"
+                                      >
+                                        <X size={12} />
+                                      </button>
+                                    </div>
+                                  </div>
+                                  
+                                  {/* Display Code (Read-only) */}
+                                  <div className="flex items-center gap-2 pl-6">
+                                    <span className="text-[7px] uppercase tracking-widest opacity-20 font-bold">Ref:</span>
+                                    <span className="text-[9px] font-mono text-[#6b7cff] opacity-60">{mask.displayCode}</span>
+                                  </div>
+                                </div>
+                              ))
+                            )}
+                          </div>
+                        </div>
+                      )}
                     </div>
 
                     <div className="w-px h-6 bg-white/10 mx-0.5"></div>
