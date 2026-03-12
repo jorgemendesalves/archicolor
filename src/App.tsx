@@ -333,6 +333,9 @@ export default function App() {
   };
 
   const removeMask = (maskId: string) => {
+    const isLastMask = sessionMasks.size <= 1;
+    const isActiveMask = selectedRenderColor === maskId;
+
     setSessionMasks(prev => {
       const next = new Map(prev);
       next.delete(maskId);
@@ -343,7 +346,8 @@ export default function App() {
       next.delete(maskId);
       return next;
     });
-    if (selectedRenderColor === maskId) {
+
+    if (isActiveMask || isLastMask) {
       setSelectedRenderColor(null);
       setSelectionMask(null);
       setIsToolbarVisible(false);
