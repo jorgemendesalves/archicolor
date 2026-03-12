@@ -1,11 +1,6 @@
 import React, { useState, useRef, useEffect, useCallback } from 'react';
-import { Upload, Pipette, RotateCcw, Download, Image as ImageIcon, Check, Layers, Search, Loader2, ChevronUp } from 'lucide-react';
+import { Upload, Pipette, RotateCcw, Download, Image as ImageIcon, Check, Layers, Search, Loader2, ChevronUp, Eye, EyeOff, X } from 'lucide-react';
 import { getMapeiColorByCode, searchMapeiColors, loadMapeiPalette, getGroupedPalette, MapeiColor, ColorFamily } from './services/mapeiPalette';
-
-interface Modification {
-  renderIdColor: string; // hex
-  targetColor: string; // hex
-}
 
 export default function App() {
   const [originalImage, setOriginalImage] = useState<HTMLImageElement | null>(null);
@@ -24,13 +19,16 @@ export default function App() {
   const [selectionMask, setSelectionMask] = useState<Uint8ClampedArray | null>(null);
   const [isToolbarVisible, setIsToolbarVisible] = useState(true);
   const [isPaletteOpen, setIsPaletteOpen] = useState(false);
-  const [showMods, setShowMods] = useState(false);
+  const [recentColors, setRecentColors] = useState<string[]>([]);
+  const [isPreviewEnabled, setIsPreviewEnabled] = useState(false);
+  const [previewColor, setPreviewColor] = useState<string | null>(null);
 
   const canvasRef = useRef<HTMLCanvasElement>(null);
   const renderIdCanvasRef = useRef<HTMLCanvasElement>(null);
   const originalCanvasRef = useRef<HTMLCanvasElement>(null);
   const searchInputRef = useRef<HTMLInputElement>(null);
   const toolbarRef = useRef<HTMLDivElement>(null);
+  const hoverTimerRef = useRef<NodeJS.Timeout | null>(null);
 
   useEffect(() => {
     const handleClickOutside = (event: MouseEvent) => {
@@ -145,11 +143,32 @@ export default function App() {
     const renderIdData = ridCtx.getImageData(0, 0, width, height);
     const outputData = ctx.createImageData(width, height);
 
-    // Prepare modifications for faster lookup
-    const mods = Array.from(modifications.entries()).map(([ridHex, targetHex]) => ({
-      rid: hexToRgb(ridHex),
-      target: hexToRgb(targetHex)
-    }));
+    // Prepare modifications with priority: Preview > Current Selection > Committed Mods
+    const mods: { rid: { r: number, g: number, b: number }, target: { r: number, g: number, b: number } }[] = [];
+
+    // 1. Preview Color (Hover)
+    if (previewColor && selectedRenderColor) {
+      mods.push({
+        rid: hexToRgb(selectedRenderColor),
+        target: hexToRgb(previewColor)
+      });
+    }
+
+    // 2. Current Selected Color (Pending Apply)
+    if (selectedRenderColor) {
+      mods.push({
+        rid: hexToRgb(selectedRenderColor),
+        target: hexToRgb(currentColor)
+      });
+    }
+
+    // 3. Committed Modifications
+    modifications.forEach((targetHex, ridHex) => {
+      mods.push({
+        rid: hexToRgb(ridHex),
+        target: hexToRgb(targetHex)
+      });
+    });
 
     for (let i = 0; i < originalData.data.length; i += 4) {
       const ridR = renderIdData.data[i];
@@ -199,13 +218,13 @@ export default function App() {
 
     ctx.putImageData(outputData, 0, 0);
     setIsProcessing(false);
-  }, [originalImage, renderIdImage, modifications, selectionMask]);
+  }, [originalImage, renderIdImage, modifications, selectionMask, previewColor, selectedRenderColor]);
 
   useEffect(() => {
     if (originalImage && renderIdImage) {
       processImage();
     }
-  }, [originalImage, renderIdImage, modifications, processImage]);
+  }, [originalImage, renderIdImage, modifications, processImage, previewColor]);
 
   const selectElementByColor = useCallback((hex: string) => {
     if (!renderIdCanvasRef.current || !originalImage) return;
@@ -270,22 +289,34 @@ export default function App() {
     selectElementByColor(hex);
   };
 
-  const applyColorChange = () => {
+  const applyColorChange = useCallback(() => {
     if (!selectedRenderColor) return;
     const newMods = new Map(modifications);
     newMods.set(selectedRenderColor, currentColor);
     setModifications(newMods);
     setSelectionMask(null); // Clear highlight after applying
-  };
+    setPreviewColor(null); // Clear preview
+
+    // Add to recent colors if not already there (or move to front)
+    setRecentColors(prev => {
+      const filtered = prev.filter(c => c !== currentColor);
+      return [currentColor, ...filtered].slice(0, 10); // Keep last 10
+    });
+  }, [selectedRenderColor, modifications, currentColor]);
 
   const resetModifications = () => {
     setModifications(new Map());
     setSelectedRenderColor(null);
     setSelectionMask(null);
     setColorCodeInput('');
+    setRecentColors([]);
   };
 
-  const searchMapeiColor = async () => {
+  const removeRecentColor = (colorToRemove: string) => {
+    setRecentColors(prev => prev.filter(color => color !== colorToRemove));
+  };
+
+  const searchMapeiColor = useCallback(async () => {
     if (!colorCodeInput.trim()) return;
     
     setIsSearchingColor(true);
@@ -305,7 +336,29 @@ export default function App() {
     } finally {
       setIsSearchingColor(false);
     }
-  };
+  }, [colorCodeInput]);
+
+  useEffect(() => {
+    const handleKeyDown = (e: KeyboardEvent) => {
+      if (!selectedRenderColor) return;
+      
+      // Don't trigger if typing in the search input
+      if (document.activeElement?.tagName === 'INPUT') {
+        if (e.key === 'Enter') {
+          searchMapeiColor();
+        }
+        return;
+      }
+
+      if (e.key === 'Enter' || e.key === ' ') {
+        e.preventDefault();
+        applyColorChange();
+      }
+    };
+
+    window.addEventListener('keydown', handleKeyDown);
+    return () => window.removeEventListener('keydown', handleKeyDown);
+  }, [selectedRenderColor, applyColorChange, searchMapeiColor]);
 
   const exportImage = () => {
     if (!canvasRef.current) return;
@@ -324,29 +377,24 @@ export default function App() {
           <p className="text-[10px] uppercase tracking-[0.3em] text-[#6b7cff] font-bold mt-1">Render ID Material Editor</p>
         </div>
         
-        <div className="flex gap-3 pointer-events-auto">
-          <button 
-            onClick={() => setShowMods(!showMods)}
-            className={`p-3 rounded-full backdrop-blur-md border transition-all ${showMods ? 'bg-[#6b7cff] border-[#6b7cff] text-white' : 'bg-[#141419]/80 border-white/10 text-[#e6e8ee] hover:bg-[#141419]'}`}
-            title="Active Modifications"
-          >
-            <Layers size={20} />
-          </button>
-          <button 
-            onClick={resetModifications}
-            className="p-3 rounded-full bg-[#141419]/80 backdrop-blur-md border border-white/10 text-[#e6e8ee] hover:bg-[#141419] transition-all"
-            title="Reset All"
-          >
-            <RotateCcw size={20} />
-          </button>
-          <button 
-            onClick={exportImage}
-            disabled={!originalImage}
-            className="flex items-center gap-2 px-6 py-3 bg-[#6b7cff] text-white rounded-full hover:bg-[#5a6aff] transition-all shadow-lg shadow-[#6b7cff]/20 disabled:opacity-30 disabled:pointer-events-none font-bold text-sm uppercase tracking-widest"
-          >
-            <Download size={18} /> Export
-          </button>
-        </div>
+        {originalImage && renderIdImage && (
+          <div className="flex gap-3 pointer-events-auto">
+            <button 
+              onClick={resetModifications}
+              className="p-3 rounded-full bg-[#141419]/80 backdrop-blur-md border border-white/10 text-[#e6e8ee] hover:bg-[#141419] transition-all"
+              title="Reset All"
+            >
+              <RotateCcw size={20} />
+            </button>
+            <button 
+              onClick={exportImage}
+              disabled={!originalImage}
+              className="flex items-center gap-2 px-6 py-3 bg-[#6b7cff] text-white rounded-full hover:bg-[#5a6aff] transition-all shadow-lg shadow-[#6b7cff]/20 disabled:opacity-30 disabled:pointer-events-none font-bold text-[10px] uppercase tracking-widest"
+            >
+              <Download size={18} /> Export
+            </button>
+          </div>
+        )}
       </header>
 
       {/* Main Viewport */}
@@ -399,59 +447,11 @@ export default function App() {
         <canvas ref={renderIdCanvasRef} className="hidden" />
         <canvas ref={originalCanvasRef} className="hidden" />
 
-        {/* Floating Modifications Sidebar */}
-        {showMods && (
-          <div className="absolute top-24 right-6 w-72 max-h-[60vh] bg-[#141419]/90 backdrop-blur-xl border border-white/10 rounded-3xl p-6 shadow-2xl z-20 overflow-hidden flex flex-col">
-            <div className="flex justify-between items-center mb-6">
-              <h3 className="text-[10px] uppercase tracking-[0.2em] font-bold text-[#6b7cff]">Active Changes</h3>
-              <span className="bg-[#6b7cff]/20 text-[#6b7cff] text-[10px] px-2 py-0.5 rounded-full font-bold">{modifications.size}</span>
-            </div>
-            <div className="flex-1 overflow-y-auto pr-2 custom-scrollbar">
-              {Array.from(modifications.entries()).map(([rid, target]) => (
-                <div 
-                  key={rid} 
-                  onClick={() => selectElementByColor(rid)}
-                  className={`group flex items-center justify-between p-3 rounded-xl bg-white/5 border mb-2 hover:bg-white/10 transition-all cursor-pointer ${selectedRenderColor === rid ? 'border-[#6b7cff]/50 bg-white/10' : 'border-white/5'}`}
-                >
-                  <div className="flex items-center gap-3">
-                    <div className="flex items-center gap-1">
-                      <div className="w-4 h-4 rounded-sm border border-white/10" style={{ backgroundColor: rid }}></div>
-                      <span className="text-[#e6e8ee]/40">→</span>
-                      <div className="w-4 h-4 rounded-sm border border-white/10" style={{ backgroundColor: target }}></div>
-                    </div>
-                  </div>
-                  <button 
-                    onClick={(e) => {
-                      e.stopPropagation();
-                      const next = new Map(modifications);
-                      next.delete(rid);
-                      setModifications(next);
-                      if (selectedRenderColor === rid) {
-                        setSelectedRenderColor(null);
-                        setSelectionMask(null);
-                      }
-                    }}
-                    className="text-[10px] font-bold text-red-400/50 group-hover:text-red-400 transition-colors uppercase tracking-tighter"
-                  >
-                    Remove
-                  </button>
-                </div>
-              ))}
-              {modifications.size === 0 && (
-                <div className="flex flex-col items-center justify-center py-12 opacity-20">
-                  <Layers size={32} className="mb-2" />
-                  <p className="text-[10px] uppercase tracking-widest">No changes applied</p>
-                </div>
-              )}
-            </div>
-          </div>
-        )}
-
         {/* Floating Bottom Toolbar & Palette */}
         {originalImage && renderIdImage && (
           <div 
             ref={toolbarRef}
-            className="absolute bottom-0 left-1/2 -translate-x-1/2 w-full flex flex-col items-center z-40 pointer-events-none"
+            className="fixed bottom-0 left-0 right-0 flex flex-col items-center z-40 pointer-events-none"
           >
             {/* Palette Overlay (Popup) */}
             {selectedRenderColor && isPaletteOpen && (
@@ -461,9 +461,27 @@ export default function App() {
                   <div className="absolute -bottom-2 left-1/2 -translate-x-1/2 w-4 h-4 bg-[#141419] border-r border-b border-white/10 rotate-45"></div>
                   
                   <div className="flex justify-between items-center mb-4">
-                    <div className="flex flex-col">
-                      <span className="text-[8px] uppercase tracking-[0.2em] font-bold text-[#6b7cff]">Mapei Master Collection</span>
-                      <span className="text-[10px] text-white/40 font-medium">Browse by color family</span>
+                    <div className="flex items-center gap-4">
+                      <div className="flex flex-col">
+                        <span className="text-[8px] uppercase tracking-[0.2em] font-bold text-[#6b7cff]">Mapei Master Collection</span>
+                        <span className="text-[10px] text-white/40 font-medium">Browse by color family</span>
+                      </div>
+                      
+                      {/* Preview Toggle */}
+                      <div className="flex items-center gap-2 bg-white/5 px-3 py-1.5 rounded-full border border-white/5">
+                        <span className="text-[8px] uppercase tracking-widest font-bold text-white/40">Preview</span>
+                        <button 
+                          onClick={() => {
+                            setIsPreviewEnabled(!isPreviewEnabled);
+                            if (isPreviewEnabled) setPreviewColor(null);
+                          }}
+                          className={`flex items-center gap-2 px-2 py-1 rounded-full transition-all ${isPreviewEnabled ? 'bg-[#6b7cff] text-white' : 'bg-white/5 text-white/40'}`}
+                          title={isPreviewEnabled ? "Disable Live Preview" : "Enable Live Preview"}
+                        >
+                          {isPreviewEnabled ? <Eye size={12} /> : <EyeOff size={12} />}
+                          <span className="text-[8px] font-bold">{isPreviewEnabled ? 'ON' : 'OFF'}</span>
+                        </button>
+                      </div>
                     </div>
                     <button 
                       onClick={() => setIsPaletteOpen(false)}
@@ -474,7 +492,7 @@ export default function App() {
                   </div>
 
                   {/* Family Tabs */}
-                  <div className="flex items-center gap-1.5 mb-5 overflow-x-auto pb-2 custom-scrollbar no-scrollbar">
+                  <div className="flex flex-wrap items-center gap-1.5 mb-5">
                     {groupedPalette.map(family => (
                       <button
                         key={family.id}
@@ -497,7 +515,19 @@ export default function App() {
                             setCurrentColor(c.hex);
                             setColorCodeInput(c.code);
                           }}
-                          className={`aspect-square rounded-md border transition-all hover:scale-110 relative group ${currentColor === c.hex ? 'border-white ring-2 ring-[#6b7cff] z-10' : 'border-white/5'}`}
+                          onMouseEnter={() => {
+                            if (isPreviewEnabled && selectedRenderColor) {
+                              if (hoverTimerRef.current) clearTimeout(hoverTimerRef.current);
+                              hoverTimerRef.current = setTimeout(() => {
+                                setPreviewColor(c.hex);
+                              }, 200);
+                            }
+                          }}
+                          onMouseLeave={() => {
+                            if (hoverTimerRef.current) clearTimeout(hoverTimerRef.current);
+                            setPreviewColor(null);
+                          }}
+                          className={`aspect-square rounded-md border transition-all hover:scale-110 relative group ${currentColor === c.hex ? 'border-white ring-2 ring-[#6b7cff] shadow-[0_0_15px_rgba(107,124,255,0.5)] z-10' : 'border-white/5'}`}
                           style={{ backgroundColor: c.hex }}
                         >
                           <div className="absolute -top-7 left-1/2 -translate-x-1/2 bg-[#0f1115] text-white text-[7px] px-1.5 py-0.5 rounded opacity-0 group-hover:opacity-100 transition-opacity pointer-events-none whitespace-nowrap z-50 border border-white/10 shadow-xl">
@@ -507,6 +537,64 @@ export default function App() {
                       ))}
                     </div>
                   </div>
+                </div>
+              </div>
+            )}
+
+            {/* Recent Colors History */}
+            {recentColors.length > 0 && (
+              <div className={`mb-3 flex items-center gap-2 transition-all duration-500 ${isToolbarVisible ? 'translate-y-0 opacity-100' : 'translate-y-8 opacity-0'}`}>
+                <span className="text-[8px] uppercase tracking-[0.2em] font-bold text-white/30 mr-1">Recent</span>
+                <div className="flex items-center gap-1.5 pointer-events-auto">
+                  {recentColors.map((color, idx) => (
+                    <div key={`${color}-${idx}`} className="relative group/recent">
+                      <button
+                        onClick={() => {
+                          setCurrentColor(color);
+                          const mapeiMatch = mapeiPalette.find(c => c.hex === color);
+                          if (mapeiMatch) setColorCodeInput(mapeiMatch.code);
+
+                          // Apply immediately if a mask is selected
+                          if (selectedRenderColor) {
+                            const newMods = new Map(modifications);
+                            newMods.set(selectedRenderColor, color);
+                            setModifications(newMods);
+                            setSelectionMask(null);
+                            
+                            // Update recent colors list (move to front)
+                            setRecentColors(prev => {
+                              const filtered = prev.filter(c => c !== color);
+                              return [color, ...filtered].slice(0, 10);
+                            });
+                          }
+                        }}
+                        onMouseEnter={() => {
+                          if (isPreviewEnabled && selectedRenderColor) {
+                            if (hoverTimerRef.current) clearTimeout(hoverTimerRef.current);
+                            hoverTimerRef.current = setTimeout(() => {
+                              setPreviewColor(color);
+                            }, 200);
+                          }
+                        }}
+                        onMouseLeave={() => {
+                          if (hoverTimerRef.current) clearTimeout(hoverTimerRef.current);
+                          setPreviewColor(null);
+                        }}
+                        className={`w-6 h-6 rounded-full border border-white/10 hover:scale-110 transition-all shadow-lg ${currentColor === color ? 'ring-2 ring-[#6b7cff] border-white shadow-[0_0_10px_rgba(107,124,255,0.4)]' : ''}`}
+                        style={{ backgroundColor: color }}
+                        title={color}
+                      />
+                      <button 
+                        onClick={(e) => {
+                          e.stopPropagation();
+                          removeRecentColor(color);
+                        }}
+                        className="absolute -top-1 -right-1 w-3 h-3 bg-red-500 text-white rounded-full flex items-center justify-center opacity-0 group-hover/recent:opacity-100 transition-opacity hover:bg-red-600 z-10"
+                      >
+                        <X size={8} />
+                      </button>
+                    </div>
+                  ))}
                 </div>
               </div>
             )}
@@ -554,13 +642,6 @@ export default function App() {
                           style={{ backgroundColor: currentColor }}
                           title="Open Mapei Palette"
                         />
-                        <input 
-                          type="color" 
-                          value={currentColor}
-                          onChange={(e) => setCurrentColor(e.target.value)}
-                          className="w-4 h-4 rounded-full cursor-pointer border border-white/20 bg-transparent p-0 overflow-hidden opacity-40 hover:opacity-100 transition-opacity"
-                          title="Custom Color Picker"
-                        />
                         <div className="absolute -top-8 left-1/2 -translate-x-1/2 bg-[#141419] border border-white/10 px-2 py-1 rounded text-[9px] font-mono opacity-0 group-hover:opacity-100 transition-opacity whitespace-nowrap">
                           {currentColor}
                         </div>
@@ -589,12 +670,25 @@ export default function App() {
                     <div className="w-px h-6 bg-white/10 mx-0.5"></div>
 
                     {/* Apply Button */}
-                    <button 
-                      onClick={applyColorChange}
-                      className="flex items-center gap-1.5 px-6 py-2 bg-white text-[#0f1115] rounded-full hover:bg-[#6b7cff] hover:text-white transition-all font-bold text-[10px] uppercase tracking-widest"
-                    >
-                      <Check size={16} /> Apply
-                    </button>
+                    <div className="relative group">
+                      <button 
+                        onClick={applyColorChange}
+                        className="flex items-center gap-1.5 px-6 py-2 bg-white text-[#0f1115] rounded-full hover:bg-[#6b7cff] hover:text-white transition-all font-bold text-[10px] uppercase tracking-widest"
+                      >
+                        <Check size={16} /> Apply
+                      </button>
+                      
+                      {/* Shortcut Tooltip */}
+                      <div className="absolute -bottom-6 -right-2 flex items-center gap-1 px-1.5 py-0.5 bg-[#141419]/90 backdrop-blur-md border border-white/10 rounded-md opacity-0 group-hover:opacity-100 transition-all duration-200 pointer-events-none scale-90 group-hover:scale-100 whitespace-nowrap">
+                        <div className="flex items-center gap-1 text-[7px] font-bold text-white/40">
+                          <span className="text-[9px]">↵</span> ENTER
+                        </div>
+                        <div className="w-px h-1.5 bg-white/10"></div>
+                        <div className="flex items-center gap-1 text-[7px] font-bold text-white/40">
+                          SPACE
+                        </div>
+                      </div>
+                    </div>
                   </>
                 )}
               </div>
@@ -605,7 +699,7 @@ export default function App() {
         {/* Toolbar Indicator (Visible when hidden) */}
         {originalImage && renderIdImage && !isToolbarVisible && (
           <div 
-            className="absolute bottom-4 left-1/2 -translate-x-1/2 z-50 cursor-pointer animate-bounce flex flex-col items-center group"
+            className="fixed bottom-4 left-1/2 -translate-x-1/2 z-50 cursor-pointer animate-bounce flex flex-col items-center group"
             onMouseEnter={() => setIsToolbarVisible(true)}
           >
             <div className="bg-[#6b7cff] w-12 h-1.5 rounded-full mb-2 shadow-[0_0_15px_rgba(107,124,255,0.5)] transition-all group-hover:w-16"></div>

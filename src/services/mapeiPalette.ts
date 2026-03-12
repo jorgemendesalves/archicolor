@@ -43,16 +43,16 @@ function rgbToHsl(r: number, g: number, b: number): { h: number; s: number; l: n
  * Assigns a color to a family bucket based on HSL.
  */
 function getFamilyId(h: number, s: number, l: number): string {
-  if (s < 12) return 'neutrals';
-  if (h < 15 || h >= 345) return 'reds';
-  if (h < 45) return 'oranges';
-  if (h < 70) return 'yellows';
+  if (s < 8) return 'neutrals';
+  if (h < 20 || h >= 340) return 'reds';
+  if (h < 50) return 'oranges';
+  if (h < 75) return 'yellows';
   if (h < 100) return 'yellow-greens';
-  if (h < 150) return 'greens';
-  if (h < 190) return 'teals';
-  if (h < 250) return 'blues';
-  if (h < 280) return 'blue-violets';
-  if (h < 345) return 'violets';
+  if (h < 155) return 'greens';
+  if (h < 195) return 'teals';
+  if (h < 255) return 'blues';
+  if (h < 285) return 'blue-violets';
+  if (h < 340) return 'violets';
   return 'neutrals';
 }
 
