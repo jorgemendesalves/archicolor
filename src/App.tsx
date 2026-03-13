@@ -1,5 +1,6 @@
 import React, { useState, useRef, useEffect, useCallback } from 'react';
-import { Upload, Pipette, RotateCcw, Download, Image as ImageIcon, Check, Layers, Search, Loader2, ChevronUp, Eye, EyeOff, X } from 'lucide-react';
+import { Upload, Pipette, RotateCcw, Download, Image as ImageIcon, Check, Layers, Search, Loader2, ChevronUp, Eye, EyeOff, X, Star, Archive, MoreVertical, CheckCircle2 } from 'lucide-react';
+import JSZip from 'jszip';
 import { getMapeiColorByCode, searchMapeiColors, loadMapeiPalette, getGroupedPalette, MapeiColor, ColorFamily } from './services/mapeiPalette';
 
 interface MaskMetadata {
@@ -31,20 +32,26 @@ export default function App() {
   const [isToolbarVisible, setIsToolbarVisible] = useState(true);
   const [isPaletteOpen, setIsPaletteOpen] = useState(false);
   const [recentColors, setRecentColors] = useState<string[]>([]);
+  const [favoriteColors, setFavoriteColors] = useState<string[]>([]);
+  const [isExportMenuOpen, setIsExportMenuOpen] = useState(false);
+  const [isBatchExporting, setIsBatchExporting] = useState(false);
+  const [exportProgress, setExportProgress] = useState(0);
   const [isPreviewEnabled, setIsPreviewEnabled] = useState(false);
   const [previewColor, setPreviewColor] = useState<string | null>(null);
 
   const canvasRef = useRef<HTMLCanvasElement>(null);
   const renderIdCanvasRef = useRef<HTMLCanvasElement>(null);
   const originalCanvasRef = useRef<HTMLCanvasElement>(null);
-  const searchInputRef = useRef<HTMLInputElement>(null);
+  const headerRef = useRef<HTMLElement>(null);
   const toolbarRef = useRef<HTMLDivElement>(null);
+  const searchInputRef = useRef<HTMLInputElement>(null);
   const hoverTimerRef = useRef<NodeJS.Timeout | null>(null);
 
   // Load from localStorage on mount
   useEffect(() => {
     const savedMods = localStorage.getItem('archicolor_modifications');
     const savedRecent = localStorage.getItem('archicolor_recent');
+    const savedFavorites = localStorage.getItem('archicolor_favorites');
 
     if (savedMods) {
       try {
@@ -56,6 +63,11 @@ export default function App() {
       try {
         setRecentColors(JSON.parse(savedRecent));
       } catch (e) { console.error("Failed to load recent", e); }
+    }
+    if (savedFavorites) {
+      try {
+        setFavoriteColors(JSON.parse(savedFavorites));
+      } catch (e) { console.error("Failed to load favorites", e); }
     }
   }, []);
 
@@ -72,11 +84,20 @@ export default function App() {
   }, [recentColors]);
 
   useEffect(() => {
+    localStorage.setItem('archicolor_favorites', JSON.stringify(favoriteColors));
+  }, [favoriteColors]);
+
+  useEffect(() => {
     const handleClickOutside = (event: MouseEvent) => {
-      if (toolbarRef.current && !toolbarRef.current.contains(event.target as Node)) {
+      const target = event.target as Node;
+      const clickedInToolbar = toolbarRef.current?.contains(target);
+      const clickedInHeader = headerRef.current?.contains(target);
+
+      if (!clickedInToolbar && !clickedInHeader) {
         setIsToolbarVisible(false);
         setIsPaletteOpen(false);
         setIsMaskManagerOpen(false);
+        setIsExportMenuOpen(false);
       }
     };
     document.addEventListener('mousedown', handleClickOutside);
@@ -461,22 +482,173 @@ export default function App() {
     };
   }, [selectedRenderColor, applyColorChange, searchMapeiColor]);
 
+  const toggleFavorite = (color: string) => {
+    setFavoriteColors(prev => 
+      prev.includes(color) 
+        ? prev.filter(c => c !== color) 
+        : [...prev, color]
+    );
+  };
+
+  const batchExport = async (colors: string[]) => {
+    console.log("Starting batch export for colors:", colors);
+    if (!selectedRenderColor || colors.length === 0 || !originalImage || !renderIdImage || !renderIdCanvasRef.current || !originalCanvasRef.current) {
+      console.error("Export preconditions not met", { 
+        selectedRenderColor, 
+        colorsCount: colors.length, 
+        originalImage: !!originalImage, 
+        renderIdImage: !!renderIdImage,
+        renderIdCanvas: !!renderIdCanvasRef.current,
+        originalCanvas: !!originalCanvasRef.current
+      });
+      return;
+    }
+    
+    setIsExportMenuOpen(false);
+    setIsBatchExporting(true);
+    setExportProgress(0);
+    
+    try {
+      const zip = new JSZip();
+      const width = originalImage.width;
+      const height = originalImage.height;
+      
+      const originalCtx = originalCanvasRef.current.getContext('2d', { willReadFrequently: true });
+      const renderIdCtx = renderIdCanvasRef.current.getContext('2d', { willReadFrequently: true });
+      
+      if (!originalCtx || !renderIdCtx) throw new Error("Could not get canvas context");
+
+      // Ensure source canvases are up to date
+      originalCanvasRef.current.width = width;
+      originalCanvasRef.current.height = height;
+      renderIdCanvasRef.current.width = width;
+      renderIdCanvasRef.current.height = height;
+      originalCtx.drawImage(originalImage, 0, 0);
+      renderIdCtx.drawImage(renderIdImage, 0, 0);
+
+      const originalData = originalCtx.getImageData(0, 0, width, height);
+      const renderIdData = renderIdCtx.getImageData(0, 0, width, height);
+      
+      const maskRgb = hexToRgb(selectedRenderColor);
+      const committedMods = Array.from(modifications.entries()).map(([rid, target]) => ({
+        rid: hexToRgb(rid),
+        target: hexToRgb(target)
+      }));
+
+      // Create a single worker canvas to reuse
+      const outputCanvas = document.createElement('canvas');
+      outputCanvas.width = width;
+      outputCanvas.height = height;
+      const outputCtx = outputCanvas.getContext('2d');
+      if (!outputCtx) throw new Error("Could not get output context");
+
+      for (let i = 0; i < colors.length; i++) {
+        const color = colors[i];
+        const targetRgb = hexToRgb(color);
+        const outputData = outputCtx.createImageData(width, height);
+        
+        const currentMods = [...committedMods];
+        const existingIdx = currentMods.findIndex(m => colorsMatch(m.rid.r, m.rid.g, m.rid.b, maskRgb.r, maskRgb.g, maskRgb.b, 2));
+        if (existingIdx >= 0) {
+          currentMods[existingIdx] = { rid: maskRgb, target: targetRgb };
+        } else {
+          currentMods.push({ rid: maskRgb, target: targetRgb });
+        }
+
+        for (let j = 0; j < originalData.data.length; j += 4) {
+          const ridR = renderIdData.data[j];
+          const ridG = renderIdData.data[j + 1];
+          const ridB = renderIdData.data[j + 2];
+          
+          let target: { r: number, g: number, b: number } | null = null;
+          for (const mod of currentMods) {
+            if (colorsMatch(ridR, ridG, ridB, mod.rid.r, mod.rid.g, mod.rid.b, 2)) {
+              target = mod.target;
+              break;
+            }
+          }
+
+          if (target) {
+            const r = originalData.data[j];
+            const g = originalData.data[j + 1];
+            const b = originalData.data[j + 2];
+            const l = (0.2126 * r + 0.7152 * g + 0.0722 * b) / 255;
+            outputData.data[j] = Math.min(255, target.r * Math.pow(l, 0.8) * 1.1);
+            outputData.data[j + 1] = Math.min(255, target.g * Math.pow(l, 0.8) * 1.1);
+            outputData.data[j + 2] = Math.min(255, target.b * Math.pow(l, 0.8) * 1.1);
+            outputData.data[j + 3] = 255;
+          } else {
+            outputData.data[j] = originalData.data[j];
+            outputData.data[j + 1] = originalData.data[j + 1];
+            outputData.data[j + 2] = originalData.data[j + 2];
+            outputData.data[j + 3] = originalData.data[j + 3];
+          }
+        }
+        
+        outputCtx.putImageData(outputData, 0, 0);
+        const dataUrl = outputCanvas.toDataURL('image/png');
+        const base64Data = dataUrl.split(',')[1];
+        
+        const mapeiMatch = mapeiPalette.find(c => c.hex === color);
+        const colorCode = mapeiMatch ? mapeiMatch.code : color.replace('#', '');
+        const fileName = `${originalFileName || 'render'}_${colorCode}_Archicolor.png`;
+        zip.file(fileName, base64Data, { base64: true });
+        
+        setExportProgress(Math.round(((i + 1) / colors.length) * 100));
+        await new Promise(resolve => setTimeout(resolve, 10));
+      }
+      
+      const content = await zip.generateAsync({ type: 'blob' });
+      const url = URL.createObjectURL(content);
+      const link = document.body.appendChild(document.createElement('a'));
+      link.style.display = 'none';
+      link.href = url;
+      link.download = `${originalFileName || 'render'}_Batch_Archicolor.zip`;
+      link.click();
+      setTimeout(() => {
+        URL.revokeObjectURL(url);
+        link.remove();
+      }, 1000);
+    } catch (error) {
+      console.error("Error generating zip:", error);
+      alert("Export failed. Please try again.");
+    } finally {
+      setIsBatchExporting(false);
+    }
+  };
+
   const exportImage = () => {
-    if (!canvasRef.current) return;
-    const link = document.createElement('a');
+    console.log("Starting single image export");
+    if (!canvasRef.current) {
+      console.error("Canvas ref is null");
+      return;
+    }
     
-    const colorCode = colorCodeInput ? `_${colorCodeInput}` : '';
-    const fileName = `${originalFileName}${colorCode}_Archicolor.png`;
-    
-    link.download = fileName;
-    link.href = canvasRef.current.toDataURL('image/png');
-    link.click();
+    setIsExportMenuOpen(false);
+    try {
+      const dataUrl = canvasRef.current.toDataURL('image/png');
+      const link = document.body.appendChild(document.createElement('a'));
+      link.style.display = 'none';
+      const colorCode = colorCodeInput ? `_${colorCodeInput}` : '';
+      const fileName = `${originalFileName || 'render'}${colorCode}_Archicolor.png`;
+      
+      link.href = dataUrl;
+      link.download = fileName;
+      link.click();
+      setTimeout(() => {
+        link.remove();
+      }, 1000);
+      console.log("Single image export triggered");
+    } catch (error) {
+      console.error("Export failed:", error);
+      alert("Export failed. Please try again.");
+    }
   };
 
   return (
     <div className="h-screen w-screen bg-[#0f1115] text-[#e6e8ee] font-sans selection:bg-[#6b7cff] selection:text-white overflow-hidden flex flex-col">
       {/* Top Bar */}
-      <header className="absolute top-0 left-0 right-0 z-20 p-6 flex justify-between items-center pointer-events-none">
+      <header ref={headerRef} className="absolute top-0 left-0 right-0 z-20 p-6 flex justify-between items-center pointer-events-none">
         <div className="pointer-events-auto">
           <h1 className="text-2xl font-sans font-bold tracking-tight text-[#e6e8ee]">Archicolor</h1>
           <p className="text-[10px] uppercase tracking-[0.3em] text-[#6b7cff] font-bold mt-1">Render ID Material Editor</p>
@@ -500,13 +672,72 @@ export default function App() {
             >
               <RotateCcw size={20} />
             </button>
-            <button 
-              onClick={exportImage}
-              disabled={!originalImage}
-              className="flex items-center gap-2 px-6 py-3 bg-[#6b7cff] text-white rounded-full hover:bg-[#5a6aff] transition-all shadow-lg shadow-[#6b7cff]/20 disabled:opacity-30 disabled:pointer-events-none font-bold text-[10px] uppercase tracking-widest"
-            >
-              <Download size={18} /> Export
-            </button>
+            
+            <div className="relative">
+              <button 
+                onClick={() => setIsExportMenuOpen(!isExportMenuOpen)}
+                disabled={!originalImage || isBatchExporting}
+                className="flex items-center gap-2 px-6 py-3 bg-[#6b7cff] text-white rounded-full hover:bg-[#5a6aff] transition-all shadow-lg shadow-[#6b7cff]/20 disabled:opacity-30 disabled:pointer-events-none font-bold text-[10px] uppercase tracking-widest"
+              >
+                {isBatchExporting ? (
+                  <>
+                    <Loader2 size={18} className="animate-spin" />
+                    {exportProgress}%
+                  </>
+                ) : (
+                  <>
+                    <Download size={18} /> Export
+                  </>
+                )}
+              </button>
+
+              {isExportMenuOpen && (
+                <div className="absolute top-full right-0 mt-2 w-56 bg-[#141419]/95 backdrop-blur-xl border border-white/10 rounded-2xl shadow-2xl p-2 z-50 animate-in fade-in slide-in-from-top-2 duration-200">
+                  <button 
+                    onClick={exportImage}
+                    className="w-full flex items-center gap-3 px-4 py-3 rounded-xl hover:bg-white/5 transition-colors text-left"
+                  >
+                    <ImageIcon size={16} className="text-[#6b7cff]" />
+                    <div className="flex flex-col">
+                      <span className="text-[10px] font-bold text-white">Current View</span>
+                      <span className="text-[8px] text-white/40 uppercase tracking-tighter">Single PNG file</span>
+                    </div>
+                  </button>
+
+                  <div className="h-px bg-white/5 my-1 mx-2"></div>
+
+                  <button 
+                    onClick={() => batchExport(favoriteColors)}
+                    disabled={favoriteColors.length === 0 || !selectedRenderColor}
+                    className="w-full flex items-center gap-3 px-4 py-3 rounded-xl hover:bg-white/5 transition-colors text-left disabled:opacity-30 disabled:pointer-events-none"
+                  >
+                    <Star size={16} className="text-yellow-400" />
+                    <div className="flex flex-col">
+                      <span className="text-[10px] font-bold text-white">Favorites Only</span>
+                      <span className="text-[8px] text-white/40 uppercase tracking-tighter">{favoriteColors.length} colors • ZIP</span>
+                    </div>
+                  </button>
+
+                  <button 
+                    onClick={() => batchExport(recentColors)}
+                    disabled={recentColors.length === 0 || !selectedRenderColor}
+                    className="w-full flex items-center gap-3 px-4 py-3 rounded-xl hover:bg-white/5 transition-colors text-left disabled:opacity-30 disabled:pointer-events-none"
+                  >
+                    <Archive size={16} className="text-white/60" />
+                    <div className="flex flex-col">
+                      <span className="text-[10px] font-bold text-white">All Recent Colors</span>
+                      <span className="text-[8px] text-white/40 uppercase tracking-tighter">{recentColors.length} colors • ZIP</span>
+                    </div>
+                  </button>
+                  
+                  {!selectedRenderColor && (
+                    <div className="mt-2 px-4 py-2 bg-yellow-400/10 rounded-lg border border-yellow-400/20">
+                      <p className="text-[8px] text-yellow-400 font-medium leading-tight">Select a mask first to enable batch export.</p>
+                    </div>
+                  )}
+                </div>
+              )}
+            </div>
           </div>
         )}
       </header>
@@ -645,6 +876,11 @@ export default function App() {
                           className={`aspect-square rounded-md border transition-all hover:scale-110 relative group ${currentColor === c.hex ? 'border-white ring-2 ring-[#6b7cff] shadow-[0_0_15px_rgba(107,124,255,0.5)] z-10' : 'border-white/5'}`}
                           style={{ backgroundColor: c.hex }}
                         >
+                          {favoriteColors.includes(c.hex) && (
+                            <div className="absolute -top-1 -right-1 bg-yellow-400 rounded-full p-0.5 shadow-sm z-20">
+                              <Star size={6} className="text-[#0f1115] fill-current" />
+                            </div>
+                          )}
                           <div className="absolute -top-7 left-1/2 -translate-x-1/2 bg-[#0f1115] text-white text-[7px] px-1.5 py-0.5 rounded opacity-0 group-hover:opacity-100 transition-opacity pointer-events-none whitespace-nowrap z-50 border border-white/10 shadow-xl">
                             {c.code}
                           </div>
@@ -660,52 +896,74 @@ export default function App() {
             {recentColors.length > 0 && (
               <div className={`mb-3 flex items-center gap-2 transition-all duration-500 ${isToolbarVisible ? 'translate-y-0 opacity-100' : 'translate-y-8 opacity-0'}`}>
                 <div className="flex items-center gap-1.5 pointer-events-auto">
-                  {recentColors.map((color) => (
-                    <div key={color} className="relative group/recent">
-                      <button
-                        onClick={() => {
-                          setCurrentColor(color);
-                          const mapeiMatch = mapeiPalette.find(c => c.hex === color);
-                          if (mapeiMatch) setColorCodeInput(mapeiMatch.code);
+                  {recentColors.map((color) => {
+                    const isFavorite = favoriteColors.includes(color);
+                    return (
+                      <div key={color} className="relative group/recent py-3 -my-3 px-1 -mx-1">
+                        <button
+                          onClick={() => {
+                            setCurrentColor(color);
+                            const mapeiMatch = mapeiPalette.find(c => c.hex === color);
+                            if (mapeiMatch) setColorCodeInput(mapeiMatch.code);
 
-                          // Update recent colors list (maintain position)
-                          // Removed reordering logic as per user request
-
-                          // Apply immediately if a mask is selected
-                          if (selectedRenderColor) {
-                            const newMods = new Map(modifications);
-                            newMods.set(selectedRenderColor, color);
-                            setModifications(newMods);
-                            setSelectionMask(null);
-                          }
-                        }}
-                        onMouseEnter={() => {
-                          if (isPreviewEnabled && selectedRenderColor) {
+                            // Apply immediately if a mask is selected
+                            if (selectedRenderColor) {
+                              const newMods = new Map(modifications);
+                              newMods.set(selectedRenderColor, color);
+                              setModifications(newMods);
+                              setSelectionMask(null);
+                            }
+                          }}
+                          onMouseEnter={() => {
+                            if (isPreviewEnabled && selectedRenderColor) {
+                              if (hoverTimerRef.current) clearTimeout(hoverTimerRef.current);
+                              hoverTimerRef.current = setTimeout(() => {
+                                setPreviewColor(color);
+                              }, 200);
+                            }
+                          }}
+                          onMouseLeave={() => {
                             if (hoverTimerRef.current) clearTimeout(hoverTimerRef.current);
-                            hoverTimerRef.current = setTimeout(() => {
-                              setPreviewColor(color);
-                            }, 200);
-                          }
-                        }}
-                        onMouseLeave={() => {
-                          if (hoverTimerRef.current) clearTimeout(hoverTimerRef.current);
-                          setPreviewColor(null);
-                        }}
-                        className={`w-6 h-6 rounded-full border border-white/10 hover:scale-110 transition-all shadow-lg ${currentColor === color ? 'ring-2 ring-[#6b7cff] border-white shadow-[0_0_10px_rgba(107,124,255,0.4)]' : ''}`}
-                        style={{ backgroundColor: color }}
-                        title={color}
-                      />
-                      <button 
-                        onClick={(e) => {
-                          e.stopPropagation();
-                          removeRecentColor(color);
-                        }}
-                        className="absolute -top-1 -right-1 w-3 h-3 bg-red-500 text-white rounded-full flex items-center justify-center opacity-0 group-hover/recent:opacity-100 transition-opacity hover:bg-red-600 z-10"
-                      >
-                        <X size={8} />
-                      </button>
-                    </div>
-                  ))}
+                            setPreviewColor(null);
+                          }}
+                          className={`w-6 h-6 rounded-full border border-white/10 hover:scale-110 transition-all shadow-lg relative ${currentColor === color ? 'ring-2 ring-[#6b7cff] border-white shadow-[0_0_10px_rgba(107,124,255,0.4)]' : ''}`}
+                          style={{ backgroundColor: color }}
+                          title={color}
+                        >
+                          {isFavorite && (
+                            <div className="absolute -top-1.5 -right-1.5 bg-yellow-400 rounded-full p-0.5 shadow-sm z-30">
+                              <Star size={8} className="text-[#0f1115] fill-current" />
+                            </div>
+                          )}
+                        </button>
+                        
+                        {/* Favorite Toggle Button - Positioned to overlap the bubble slightly for better hover stability */}
+                        <div className="absolute top-[25px] left-1/2 -translate-x-1/2 opacity-0 group-hover/recent:opacity-100 transition-all z-40">
+                          <button 
+                            onClick={(e) => {
+                              e.stopPropagation();
+                              toggleFavorite(color);
+                            }}
+                            className={`p-1 rounded-full bg-[#141419] border border-white/10 hover:bg-[#1c1c24] hover:text-white shadow-xl transition-colors ${isFavorite ? 'text-yellow-400' : 'text-white/40'}`}
+                            title={isFavorite ? "Remove from favorites" : "Add to favorites"}
+                          >
+                            <Star size={10} className={isFavorite ? 'fill-current' : ''} />
+                          </button>
+                        </div>
+
+                        <button 
+                          onClick={(e) => {
+                            e.stopPropagation();
+                            removeRecentColor(color);
+                          }}
+                          className="absolute top-1 -left-1 w-3 h-3 bg-red-500 text-white rounded-full flex items-center justify-center opacity-0 group-hover/recent:opacity-100 transition-opacity hover:bg-red-600 z-10"
+                          title="Remove from history"
+                        >
+                          <X size={8} />
+                        </button>
+                      </div>
+                    );
+                  })}
                 </div>
               </div>
             )}
