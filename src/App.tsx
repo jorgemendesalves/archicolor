@@ -30,6 +30,7 @@ export default function App() {
   const [selectedFamilyId, setSelectedFamilyId] = useState<string | null>(null);
   const [selectionMask, setSelectionMask] = useState<Uint8ClampedArray | null>(null);
   const [isToolbarVisible, setIsToolbarVisible] = useState(true);
+  const [selectionTolerance, setSelectionTolerance] = useState(8);
   const [isPaletteOpen, setIsPaletteOpen] = useState(false);
   const [recentColors, setRecentColors] = useState<string[]>([]);
   const [favoriteColors, setFavoriteColors] = useState<string[]>([]);
@@ -254,7 +255,7 @@ export default function App() {
       
       // Check if this pixel belongs to any modified Render ID mask
       for (const mod of mods) {
-        if (colorsMatch(ridR, ridG, ridB, mod.rid.r, mod.rid.g, mod.rid.b, 8)) {
+        if (colorsMatch(ridR, ridG, ridB, mod.rid.r, mod.rid.g, mod.rid.b, selectionTolerance)) {
           target = mod.target;
           break;
         }
@@ -288,13 +289,13 @@ export default function App() {
 
     ctx.putImageData(outputData, 0, 0);
     setIsProcessing(false);
-  }, [originalImage, renderIdImage, modifications, selectionMask, previewColor, selectedRenderColor, isShowingOriginal]);
+  }, [originalImage, renderIdImage, modifications, selectionMask, previewColor, selectedRenderColor, isShowingOriginal, selectionTolerance]);
 
   useEffect(() => {
     if (originalImage && renderIdImage) {
       processImage();
     }
-  }, [originalImage, renderIdImage, modifications, processImage, previewColor, isShowingOriginal]);
+  }, [originalImage, renderIdImage, modifications, processImage, previewColor, isShowingOriginal, selectionTolerance]);
 
   const selectElementByColor = useCallback((hex: string) => {
     if (!renderIdCanvasRef.current || !originalImage) return;
@@ -337,7 +338,7 @@ export default function App() {
     const mask = new Uint8ClampedArray(width * height);
 
     for (let i = 0; i < renderIdData.length; i += 4) {
-      if (colorsMatch(renderIdData[i], renderIdData[i+1], renderIdData[i+2], rgb.r, rgb.g, rgb.b, 8)) {
+      if (colorsMatch(renderIdData[i], renderIdData[i+1], renderIdData[i+2], rgb.r, rgb.g, rgb.b, selectionTolerance)) {
         mask[i / 4] = 255;
       } else {
         mask[i / 4] = 0;
@@ -347,7 +348,13 @@ export default function App() {
     setIsPipetteActive(false);
     setIsToolbarVisible(true);
     setIsPaletteOpen(true);
-  }, [originalImage, modifications, mapeiPalette]);
+  }, [originalImage, modifications, mapeiPalette, selectionTolerance]);
+
+  useEffect(() => {
+    if (selectedRenderColor) {
+      selectElementByColor(selectedRenderColor);
+    }
+  }, [selectionTolerance, selectedRenderColor, selectElementByColor]);
 
   const handleCanvasClick = (e: React.MouseEvent<HTMLCanvasElement>) => {
     if (!isPipetteActive || !renderIdCanvasRef.current || !originalImage) return;
@@ -552,7 +559,7 @@ export default function App() {
         const outputData = outputCtx.createImageData(width, height);
         
         const currentMods = [...committedMods];
-        const existingIdx = currentMods.findIndex(m => colorsMatch(m.rid.r, m.rid.g, m.rid.b, maskRgb.r, maskRgb.g, maskRgb.b, 8));
+        const existingIdx = currentMods.findIndex(m => colorsMatch(m.rid.r, m.rid.g, m.rid.b, maskRgb.r, maskRgb.g, maskRgb.b, selectionTolerance));
         if (existingIdx >= 0) {
           currentMods[existingIdx] = { rid: maskRgb, target: targetRgb };
         } else {
@@ -566,7 +573,7 @@ export default function App() {
           
           let target: { r: number, g: number, b: number } | null = null;
           for (const mod of currentMods) {
-            if (colorsMatch(ridR, ridG, ridB, mod.rid.r, mod.rid.g, mod.rid.b, 8)) {
+            if (colorsMatch(ridR, ridG, ridB, mod.rid.r, mod.rid.g, mod.rid.b, selectionTolerance)) {
               target = mod.target;
               break;
             }
@@ -993,6 +1000,25 @@ export default function App() {
                     {isPipetteActive ? 'Selecting...' : 'Select'}
                   </span>
                 </button>
+
+                <div className="w-px h-6 bg-white/10 mx-0.5"></div>
+
+                {/* Selection Tolerance Slider */}
+                <div className="flex flex-col px-3 min-w-[100px] group/tol">
+                  <div className="flex justify-between items-center mb-1">
+                    <span className="text-[7px] uppercase tracking-widest font-bold opacity-40 group-hover/tol:opacity-100 transition-opacity">Tolerance</span>
+                    <span className="text-[9px] font-mono text-[#6b7cff] font-bold">{selectionTolerance}</span>
+                  </div>
+                  <input 
+                    type="range" 
+                    min="1" 
+                    max="32" 
+                    step="1"
+                    value={selectionTolerance} 
+                    onChange={(e) => setSelectionTolerance(parseInt(e.target.value))}
+                    className="w-full h-1 bg-white/10 rounded-lg appearance-none cursor-pointer accent-[#6b7cff] hover:bg-white/20 transition-colors"
+                  />
+                </div>
 
                 {selectedRenderColor && (
                   <>
