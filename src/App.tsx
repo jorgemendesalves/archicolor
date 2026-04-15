@@ -203,6 +203,8 @@ export default function App() {
     originalCanvasRef.current.height = height;
 
     // Draw source images
+    origCtx.imageSmoothingEnabled = false;
+    ridCtx.imageSmoothingEnabled = false;
     origCtx.drawImage(originalImage, 0, 0);
     ridCtx.drawImage(renderIdImage, 0, 0);
 
@@ -252,7 +254,7 @@ export default function App() {
       
       // Check if this pixel belongs to any modified Render ID mask
       for (const mod of mods) {
-        if (colorsMatch(ridR, ridG, ridB, mod.rid.r, mod.rid.g, mod.rid.b, 2)) {
+        if (colorsMatch(ridR, ridG, ridB, mod.rid.r, mod.rid.g, mod.rid.b, 8)) {
           target = mod.target;
           break;
         }
@@ -335,7 +337,7 @@ export default function App() {
     const mask = new Uint8ClampedArray(width * height);
 
     for (let i = 0; i < renderIdData.length; i += 4) {
-      if (colorsMatch(renderIdData[i], renderIdData[i+1], renderIdData[i+2], rgb.r, rgb.g, rgb.b, 2)) {
+      if (colorsMatch(renderIdData[i], renderIdData[i+1], renderIdData[i+2], rgb.r, rgb.g, rgb.b, 8)) {
         mask[i / 4] = 255;
       } else {
         mask[i / 4] = 0;
@@ -523,6 +525,8 @@ export default function App() {
       originalCanvasRef.current.height = height;
       renderIdCanvasRef.current.width = width;
       renderIdCanvasRef.current.height = height;
+      originalCtx.imageSmoothingEnabled = false;
+      renderIdCtx.imageSmoothingEnabled = false;
       originalCtx.drawImage(originalImage, 0, 0);
       renderIdCtx.drawImage(renderIdImage, 0, 0);
 
@@ -548,7 +552,7 @@ export default function App() {
         const outputData = outputCtx.createImageData(width, height);
         
         const currentMods = [...committedMods];
-        const existingIdx = currentMods.findIndex(m => colorsMatch(m.rid.r, m.rid.g, m.rid.b, maskRgb.r, maskRgb.g, maskRgb.b, 2));
+        const existingIdx = currentMods.findIndex(m => colorsMatch(m.rid.r, m.rid.g, m.rid.b, maskRgb.r, maskRgb.g, maskRgb.b, 8));
         if (existingIdx >= 0) {
           currentMods[existingIdx] = { rid: maskRgb, target: targetRgb };
         } else {
@@ -562,7 +566,7 @@ export default function App() {
           
           let target: { r: number, g: number, b: number } | null = null;
           for (const mod of currentMods) {
-            if (colorsMatch(ridR, ridG, ridB, mod.rid.r, mod.rid.g, mod.rid.b, 2)) {
+            if (colorsMatch(ridR, ridG, ridB, mod.rid.r, mod.rid.g, mod.rid.b, 8)) {
               target = mod.target;
               break;
             }
